@@ -3,6 +3,7 @@ import hashlib
 import streamlit as st
 from dotenv import load_dotenv
 from engine import extract_resume, infer_profile, ai_profile, search_jobs, score_job, split_search_terms
+from daily_store import read_json, write_json
 
 load_dotenv()
 st.set_page_config(page_title='AI Job Hunter', page_icon='🎯', layout='wide')
@@ -33,6 +34,31 @@ def cached_search(app_id, app_key, role, location, country, pages, remote):
     # 24-hour cache for identical searches; Streamlit does not expose credentials in UI.
     return search_jobs(app_id, app_key, role, location, country, pages, remote)
 
+st.subheader('📬 Daily job recommendations')
+daily_password = st.text_input('Daily dashboard password (private)', type='password', key='daily_password')
+daily_unlocked = bool(secret('DAILY_DASHBOARD_PASSWORD')) and daily_password == secret('DAILY_DASHBOARD_PASSWORD')
+st.caption('Your scheduled matches are saved privately and are available here after the morning search.')
+if daily_unlocked and secret('DAILY_DATA_REPO') and secret('DAILY_GITHUB_TOKEN'):
+    if st.button('View latest daily matches') or st.query_params.get('view') == 'daily':
+        try:
+            daily = read_json(secret('DAILY_DATA_REPO'), 'latest.json', secret('DAILY_GITHUB_TOKEN'))
+            if not daily:
+                st.info('No daily report yet. Save your daily profile below and run the scheduled workflow.')
+            else:
+                st.write(f'**Report date:** {daily.get("date", "Unknown")} · **New matches:** {daily.get("total_new", 0)}')
+                if not daily.get('matches'):
+                    st.info('No new job matches in this report.')
+                for job in daily.get('matches', []):
+                    with st.container(border=True):
+                        st.markdown(f'#### {job["title"]}')
+                        st.write(f'**{job["company"]}** · {job["location"]} · **{job["score"]}%** relevance')
+                        st.write(job.get('reason', ''))
+                        st.link_button('View / apply at source ↗', job['url'])
+        except Exception:
+            st.error('Could not load daily matches. Check private repository access in Streamlit Secrets.')
+else:
+    st.caption('Enter your private dashboard password to view daily matches or save a daily profile. See DAILY_SETUP.md.')
+
 upload = st.file_uploader('Upload your resume (PDF or DOCX, max 5 MB)', type=['pdf','docx'])
 if upload is not None:
     try:
@@ -61,6 +87,22 @@ if upload is not None:
         if st.button('Reset skills from resume'):
             st.session_state['edited_skills'] = ', '.join(profile['skills'])
             st.rerun()
+    if daily_unlocked and secret('DAILY_DATA_REPO') and secret('DAILY_GITHUB_TOKEN'):
+        with st.expander('Save profile for automatic daily job searches'):
+            st.caption('Your resume text and selected skills will be stored in your private GitHub data repository. Do not enable this for other users unless you intend to support separate private profiles.')
+            if st.button('Save my daily search profile'):
+                roles = split_search_terms(role)
+                locations = split_search_terms(location) or ['']
+                if not roles or len(roles) * len(locations) > 12:
+                    st.warning('Enter target roles and no more than 12 role/location combinations in the sidebar.')
+                else:
+                    try:
+                        write_json(secret('DAILY_DATA_REPO'), 'profile.json', secret('DAILY_GITHUB_TOKEN'),
+                                   {'resume': resume, 'skills': edited_skills, 'roles': role, 'locations': location,
+                                    'country': country, 'remote': remote})
+                        st.success('Daily profile saved privately. The scheduled search will use these preferences.')
+                    except Exception:
+                        st.error('Unable to save profile. Verify the private repository and token permissions.')
     if use_ai:
         if not secret('OPENAI_API_KEY'):
             st.warning('AI analysis requires an OPENAI_API_KEY configured by the app owner.')
